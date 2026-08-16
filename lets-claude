@@ -149,13 +149,13 @@ run_setup() {
     if command -v lets-claude >/dev/null 2>&1; then
         log "command registered: $(command -v lets-claude)"
     else
-        log "command will be available after you restart your shell."
+        log "command will be available in a fresh shell."
     fi
 
     # 7. live test
     echo ""
     printf "Probe the server now? [Y/n] "
-    read -r reply; case "${reply}" in n|N) echo "Setup done. Run: lets-claude"; exit 0 ;; esac
+    read -r reply; case "${reply}" in n|N) echo "Setup done. Run: lets-claude"; offer_fresh_shell; exit 0 ;; esac
     TOKEN="${token}"; CA_FOUND=""; [ -f "${ca}" ] && CA_FOUND="${ca}"
     local found=""
     for cand in ${endpoints}; do
@@ -164,6 +164,7 @@ run_setup() {
     done
     if [ -z "${found}" ]; then
         log_error "no endpoint reachable right now — config saved; check the server and try 'lets-claude --verbose'."
+        offer_fresh_shell
         exit 1
     fi
     local info
@@ -176,7 +177,24 @@ print(d.get("id","?"), "| context:", d.get("max_model_len","?"))' 2>/dev/null ||
     echo ""
     echo "All set. Run:  lets-claude          (interactive session)"
     echo "          or:  lets-claude -p \"hi\"  (one-shot print mode)"
+    offer_fresh_shell
     exit 0
+}
+
+# The parent shell caches its command/completion tables at startup, so a
+# just-installed command isn't tab-completable there. A child process cannot
+# refresh the parent — but we can hand the user a fresh login shell instead.
+offer_fresh_shell() {
+    if [ -t 0 ]; then
+        printf "Open a refreshed shell now so 'lets-claude' + tab-completion work immediately? [Y/n] "
+        read -r reply
+        case "${reply}" in
+            n|N) echo "OK — run 'rehash' (zsh) / 'hash -r' (bash), or open a new terminal." ;;
+            *)   exec "${SHELL:-/bin/sh}" -l ;;
+        esac
+    else
+        echo "Note: run 'rehash' (zsh) / 'hash -r' (bash) or open a new terminal for tab-completion."
+    fi
 }
 
 # ------------------------------------------------------------------ probing
