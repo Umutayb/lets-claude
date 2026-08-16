@@ -159,7 +159,8 @@ run_setup() {
     TOKEN="${token}"; CA_FOUND=""; [ -f "${ca}" ] && CA_FOUND="${ca}"
     local found=""
     for cand in ${endpoints}; do
-        if MODELS_JSON="$(probe "${cand%/}")"; then found="${cand%/}"; break; fi
+        if probe "${cand%/}" > "${PROBE_OUT}"; then found="${cand%/}"; MODELS_JSON="$(cat "${PROBE_OUT}")"; break; fi
+        echo "  ${cand}: ${PROBE_ERR}"
     done
     if [ -z "${found}" ]; then
         log_error "no endpoint reachable right now — config saved; check the server and try 'lets-claude --verbose'."
@@ -190,10 +191,27 @@ tls_args_for() {
     esac
 }
 
-probe() {  # probe <base-url> -> prints /v1/models JSON on success
-    local base="$1" tls; tls="$(tls_args_for "$base")"
+PROBE_ERR=""
+PROBE_OUT="${TMPDIR:-/tmp}/.lets-claude-probe.$$"
+trap 'rm -f "${PROBE_OUT}"' EXIT
+probe() {  # probe <base-url> -> prints /v1/models JSON on success; PROBE_ERR explains failure
+    local base="$1" tls rc; tls="$(tls_args_for "$base")"
     local IFS='|'; # shellcheck disable=SC2086
-    curl -sf --max-time 4 ${tls:+$tls} -H "Authorization: Bearer ${TOKEN}" "${base}/v1/models" 2>/dev/null
+    if curl -sf --max-time 4 ${tls:+$tls} -H "Authorization: Bearer ${TOKEN}" "${base}/v1/models" 2>/dev/null; then
+        PROBE_ERR=""; return 0
+    else
+        rc=$?
+    fi
+    case "${rc}" in
+        6)  PROBE_ERR="DNS: cannot resolve host" ;;
+        7)  PROBE_ERR="connection refused (host up, port closed?)" ;;
+        28) PROBE_ERR="timed out (host unreachable / wrong IP?)" ;;
+        35) PROBE_ERR="TLS handshake failed" ;;
+        60) PROBE_ERR="TLS certificate not trusted" ;;
+        22) PROBE_ERR="HTTP error from server (4xx/5xx)" ;;
+        *)  PROBE_ERR="curl exit ${rc}" ;;
+    esac
+    return "${rc}"
 }
 
 # --------------------------------------------------------------------- main
@@ -242,13 +260,22 @@ BASE_URL=""
 MODELS_JSON=""
 if [ -n "${URL_OVERRIDE}" ]; then
     BASE_URL="${URL_OVERRIDE}"
-    MODELS_JSON="$(probe "${BASE_URL}")" || { log_error "server not reachable at ${BASE_URL}"; exit 1; }
+    probe "${BASE_URL}" > "${PROBE_OUT}" || { log_error "server not reachable at ${BASE_URL} (${PROBE_ERR})"; exit 1; }
+    MODELS_JSON="$(cat "${PROBE_OUT}")"
 else
+    FAILS=""
     for cand in ${ENDPOINTS}; do
         log_verbose "probing ${cand} ..."
-        if MODELS_JSON="$(probe "${cand%/}")"; then BASE_URL="${cand%/}"; break; fi
+        if probe "${cand%/}" > "${PROBE_OUT}"; then BASE_URL="${cand%/}"; MODELS_JSON="$(cat "${PROBE_OUT}")"; break; fi
+        FAILS="${FAILS}
+  ${cand}  ->  ${PROBE_ERR}"
+        log_verbose "  ${cand}: ${PROBE_ERR}"
     done
-    [ -n "${BASE_URL}" ] || { log_error "no endpoint reachable (tried: ${ENDPOINTS}). Is the server up?"; exit 1; }
+    if [ -z "${BASE_URL}" ]; then
+        log_error "no endpoint reachable:${FAILS}"
+        log_error "hints: 'DNS' = this machine isn't using your LAN's DNS server; 'timed out' = name resolves to the wrong IP (public instead of LAN?); 'refused' = server/port down."
+        exit 1
+    fi
 fi
 
 case "${BASE_URL}" in
