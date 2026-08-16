@@ -99,24 +99,57 @@ run_setup() {
     echo ""
     log "saved ${CONFIG_FILE}"
 
-    # 6. install to PATH + make executable
-    local self target="${HOME}/.local/bin/lets-claude"
+    # 6. register as a command: install + make executable + ensure PATH
+    local self target
     self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
-    if [ "${self}" != "${target}" ]; then
-        printf "Install this script to %s? [Y/n] " "${target}"
-        read -r reply; case "${reply}" in n|N) ;; *)
-            mkdir -p "${HOME}/.local/bin"
-            cp "${self}" "${target}" && chmod +x "${target}"
-            log "installed ${target}"
-            case ":${PATH}:" in
-                *":${HOME}/.local/bin:"*) ;;
-                *) echo ""
-                   echo "NOTE: ~/.local/bin is not on your PATH. Add this to your shell profile:"
-                   echo "    export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
-            esac ;;
-        esac
+    echo ""
+    echo "Where should the 'lets-claude' command be installed?"
+    echo "  1) ${HOME}/.local/bin   (this user only — default)"
+    echo "  2) /usr/local/bin       (system-wide, needs sudo)"
+    printf "Choice [1]: "
+    read -r reply
+    if [ "${reply:-1}" = "2" ]; then
+        target="/usr/local/bin/lets-claude"
+        sudo cp "${self}" "${target}" && sudo chmod 755 "${target}"
+        log "installed ${target}"
     else
-        chmod +x "${self}"
+        target="${HOME}/.local/bin/lets-claude"
+        mkdir -p "${HOME}/.local/bin"
+        [ "${self}" = "${target}" ] || cp "${self}" "${target}"
+        chmod +x "${target}"
+        log "installed ${target}"
+        # ensure ~/.local/bin is on PATH — offer to persist it in the shell profile
+        case ":${PATH}:" in
+            *":${HOME}/.local/bin:"*) ;;
+            *)
+                local profile
+                case "$(basename "${SHELL:-/bin/sh}")" in
+                    zsh)  profile="${HOME}/.zshrc" ;;
+                    bash) if [ "$(uname)" = "Darwin" ]; then profile="${HOME}/.bash_profile"; else profile="${HOME}/.bashrc"; fi ;;
+                    *)    profile="" ;;
+                esac
+                echo ""
+                echo "~/.local/bin is not on your PATH, so 'lets-claude' won't be found yet."
+                if [ -n "${profile}" ]; then
+                    printf "Add 'export PATH=\"\$HOME/.local/bin:\$PATH\"' to %s? [Y/n] " "${profile}"
+                    read -r reply
+                    case "${reply}" in n|N)
+                        echo "Add it manually, then restart your shell." ;;
+                    *)
+                        printf '\n# added by lets-claude setup\nexport PATH="$HOME/.local/bin:$PATH"\n' >> "${profile}"
+                        log "PATH line appended to ${profile} — restart your shell (or: source ${profile})" ;;
+                    esac
+                else
+                    echo "Add this line to your shell profile, then restart your shell:"
+                    echo "    export PATH=\"\$HOME/.local/bin:\$PATH\""
+                fi ;;
+        esac
+    fi
+    # verify registration
+    if command -v lets-claude >/dev/null 2>&1; then
+        log "command registered: $(command -v lets-claude)"
+    else
+        log "command will be available after you restart your shell."
     fi
 
     # 7. live test

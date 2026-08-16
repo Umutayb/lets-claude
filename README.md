@@ -45,9 +45,20 @@ Prerequisite: the Claude CLI itself — `npm install -g @anthropic-ai/claude-cli
 | **Token** | Sent as the API key. vLLM without `--api-key` accepts anything — the default placeholder is fine. |
 | **Root CA** | Only for `https` endpoints with a private CA (mkcert, step-ca, …). Node ignores the OS trust store, so the script exports `NODE_EXTRA_CA_CERTS` for you. |
 
-It also copies itself to `~/.local/bin`, makes it executable, warns if that
-directory isn't on your `PATH`, and finishes with a live probe that shows the
-model your server is currently serving.
+Setup then **registers `lets-claude` as a command**:
+
+1. asks where to install — `~/.local/bin` (per-user, default) or
+   `/usr/local/bin` (system-wide, via sudo),
+2. copies the script there and marks it executable,
+3. if `~/.local/bin` isn't on your `PATH`, offers to append
+   `export PATH="$HOME/.local/bin:$PATH"` to the right shell profile
+   (`~/.zshrc`, `~/.bashrc`, or `~/.bash_profile` on macOS bash),
+4. verifies with `command -v lets-claude`,
+5. and finishes with a live probe that shows the model your server is
+   currently serving.
+
+After setup (and a shell restart if the PATH line was just added), typing
+`lets-claude` anywhere just works.
 
 Everything is overridable per run: `--url`, `--model`, `--insecure`,
 `--verbose`, or env vars `LETS_CLAUDE_ENDPOINTS` / `LETS_CLAUDE_TOKEN` /
