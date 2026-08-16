@@ -1,0 +1,263 @@
+#!/usr/bin/env bash
+#
+# lets-claude — run Claude Code against your own self-hosted LLM server
+# (vLLM or any OpenAI-compatible server that exposes the Anthropic
+# /v1/messages API).
+#
+#   lets-claude setup              interactive onboarding (start here)
+#   lets-claude [args...]          launch Claude Code (args pass to `claude`,
+#                                  e.g. `lets-claude -p "hello"` for print mode)
+#   lets-claude --url <base> ...   one-off endpoint override
+#   lets-claude --model <id> ...   one-off model override
+#   lets-claude --insecure ...     skip TLS verification (self-signed certs)
+#   lets-claude --verbose ...      show endpoint probing
+#
+# What it does at launch:
+#   1. probes your configured endpoints in order, first reachable wins
+#   2. discovers the resident model AND its context window from /v1/models,
+#      then pins CLAUDE_CODE_MAX_CONTEXT_TOKENS so Claude Code never overflows
+#      your server (unknown models are otherwise assumed to have 200k context)
+#   3. exports the ANTHROPIC_* env Claude Code needs and execs `claude`
+#
+# Config: ~/.config/lets-claude/config   (created by `lets-claude setup`)
+# Env overrides: LETS_CLAUDE_ENDPOINTS (space-separated), LETS_CLAUDE_TOKEN,
+#                LETS_CLAUDE_CA (path to a root CA .pem for private TLS)
+# Needs: bash >= 3.2 (stock macOS is fine), curl, python3, claude CLI.
+
+set -euo pipefail
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/lets-claude"
+CONFIG_FILE="${CONFIG_DIR}/config"
+
+VERBOSE=false
+LOG_PREFIX="[lets-claude]"
+log()         { echo "${LOG_PREFIX} ${1}"; }
+log_verbose() { if [ "${VERBOSE}" = "true" ]; then echo "${LOG_PREFIX} ${1}"; fi; }
+log_error()   { echo "${LOG_PREFIX} ERROR: ${1}" >&2; }
+
+# ---------------------------------------------------------------- onboarding
+run_setup() {
+    echo ""
+    echo "lets-claude setup — point Claude Code at your own LLM server."
+    echo "Answers are saved to ${CONFIG_FILE} (edit it any time, or re-run setup)."
+    echo ""
+
+    # 1. prerequisites
+    local missing=""
+    command -v curl    >/dev/null || missing="${missing} curl"
+    command -v python3 >/dev/null || missing="${missing} python3"
+    if [ -n "${missing}" ]; then
+        log_error "missing prerequisites:${missing} — install them and re-run setup."
+        exit 1
+    fi
+    if ! command -v claude >/dev/null; then
+        echo "The Claude CLI is not installed. Install it with:"
+        echo "    npm install -g @anthropic-ai/claude-cli"
+        printf "Continue setup anyway? [y/N] "
+        read -r reply; case "${reply}" in y|Y) ;; *) exit 1 ;; esac
+    fi
+
+    # 2. endpoints
+    echo ""
+    echo "Enter your server base URL(s), most-preferred first (no /v1 suffix)."
+    echo "Examples:  http://localhost:8000    https://llm.my-lan.example"
+    echo "You can list several separated by spaces — the first reachable one wins"
+    echo "(useful if the same server has a localhost, LAN, and VPN address)."
+    printf "Endpoints [http://localhost:8000]: "
+    read -r endpoints
+    endpoints="${endpoints:-http://localhost:8000}"
+
+    # 3. token
+    echo ""
+    echo "API token. vLLM without --api-key accepts anything; a placeholder is fine."
+    printf "Token [dummy-key]: "
+    read -r token
+    token="${token:-dummy-key}"
+
+    # 4. CA for private TLS
+    local ca=""
+    case " ${endpoints}" in *" https://"*|" https://"*)
+        echo ""
+        echo "You listed an https endpoint. If it uses a private CA (e.g. mkcert),"
+        echo "Claude Code (Node) needs the root CA file — Node ignores the OS trust store."
+        printf "Path to root CA .pem (empty to skip): "
+        read -r ca
+        if [ -n "${ca}" ] && [ ! -f "${ca}" ]; then
+            log_error "no file at ${ca} — saving anyway; fix it in ${CONFIG_FILE} later."
+        fi ;;
+    esac
+
+    # 5. save config
+    mkdir -p "${CONFIG_DIR}"
+    {
+        echo "# lets-claude configuration (shell syntax). Re-run 'lets-claude setup' to regenerate."
+        echo "ENDPOINTS=\"${endpoints}\""
+        echo "TOKEN=\"${token}\""
+        echo "CA_PATH=\"${ca}\""
+    } > "${CONFIG_FILE}"
+    chmod 600 "${CONFIG_FILE}"
+    echo ""
+    log "saved ${CONFIG_FILE}"
+
+    # 6. install to PATH + make executable
+    local self target="${HOME}/.local/bin/lets-claude"
+    self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+    if [ "${self}" != "${target}" ]; then
+        printf "Install this script to %s? [Y/n] " "${target}"
+        read -r reply; case "${reply}" in n|N) ;; *)
+            mkdir -p "${HOME}/.local/bin"
+            cp "${self}" "${target}" && chmod +x "${target}"
+            log "installed ${target}"
+            case ":${PATH}:" in
+                *":${HOME}/.local/bin:"*) ;;
+                *) echo ""
+                   echo "NOTE: ~/.local/bin is not on your PATH. Add this to your shell profile:"
+                   echo "    export PATH=\"\$HOME/.local/bin:\$PATH\"" ;;
+            esac ;;
+        esac
+    else
+        chmod +x "${self}"
+    fi
+
+    # 7. live test
+    echo ""
+    printf "Probe the server now? [Y/n] "
+    read -r reply; case "${reply}" in n|N) echo "Setup done. Run: lets-claude"; exit 0 ;; esac
+    TOKEN="${token}"; CA_FOUND=""; [ -f "${ca}" ] && CA_FOUND="${ca}"
+    local found=""
+    for cand in ${endpoints}; do
+        if MODELS_JSON="$(probe "${cand%/}")"; then found="${cand%/}"; break; fi
+    done
+    if [ -z "${found}" ]; then
+        log_error "no endpoint reachable right now — config saved; check the server and try 'lets-claude --verbose'."
+        exit 1
+    fi
+    local info
+    info="$(printf '%s' "${MODELS_JSON}" | python3 -c '
+import json, sys
+d = (json.load(sys.stdin).get("data") or [{}])[0]
+print(d.get("id","?"), "| context:", d.get("max_model_len","?"))' 2>/dev/null || echo "?")"
+    log "reachable: ${found}"
+    log "resident model: ${info}"
+    echo ""
+    echo "All set. Run:  lets-claude          (interactive session)"
+    echo "          or:  lets-claude -p \"hi\"  (one-shot print mode)"
+    exit 0
+}
+
+# ------------------------------------------------------------------ probing
+tls_args_for() {
+    case "$1" in
+        https://*)
+            if   [ -n "${CA_FOUND}" ];     then echo "--cacert|${CA_FOUND}"
+            elif [ "${INSECURE:-false}" = true ]; then echo "-k"
+            else echo "-k"   # permissive probe; trust is enforced before launch
+            fi ;;
+        *) echo "" ;;
+    esac
+}
+
+probe() {  # probe <base-url> -> prints /v1/models JSON on success
+    local base="$1" tls; tls="$(tls_args_for "$base")"
+    local IFS='|'; # shellcheck disable=SC2086
+    curl -sf --max-time 4 ${tls:+$tls} -H "Authorization: Bearer ${TOKEN}" "${base}/v1/models" 2>/dev/null
+}
+
+# --------------------------------------------------------------------- main
+[ "${1:-}" = "setup" ] && { CA_FOUND=""; TOKEN="dummy-key"; run_setup; }
+
+# load config
+ENDPOINTS=""
+TOKEN="dummy-key"
+CA_PATH=""
+# shellcheck disable=SC1090
+[ -f "${CONFIG_FILE}" ] && . "${CONFIG_FILE}"
+ENDPOINTS="${LETS_CLAUDE_ENDPOINTS:-${ENDPOINTS}}"
+TOKEN="${LETS_CLAUDE_TOKEN:-${TOKEN}}"
+CA_PATH="${LETS_CLAUDE_CA:-${CA_PATH}}"
+
+MODEL_OVERRIDE=""
+URL_OVERRIDE=""
+INSECURE=false
+PASSTHROUGH=()
+while [ $# -gt 0 ]; do
+    case $1 in
+        --url)      [ -n "${2:-}" ] || { log_error "--url requires an argument."; exit 1; }
+                    URL_OVERRIDE="${2%/}"; shift 2 ;;
+        --model)    [ -n "${2:-}" ] || { log_error "--model requires an argument."; exit 1; }
+                    MODEL_OVERRIDE="$2"; shift 2 ;;
+        --insecure) INSECURE=true; shift ;;
+        --verbose|--debug) VERBOSE=true; shift ;;
+        -h|--help)  sed -n '3,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *)          PASSTHROUGH+=("$1"); shift ;;
+    esac
+done
+
+if [ -z "${ENDPOINTS}" ] && [ -z "${URL_OVERRIDE}" ]; then
+    log_error "no configuration found. Run:  lets-claude setup"
+    exit 1
+fi
+
+command -v claude  >/dev/null || { log_error "'claude' not found. npm install -g @anthropic-ai/claude-cli"; exit 1; }
+command -v curl    >/dev/null || { log_error "curl not found."; exit 1; }
+command -v python3 >/dev/null || { log_error "python3 not found."; exit 1; }
+
+CA_FOUND=""
+[ -n "${CA_PATH}" ] && [ -f "${CA_PATH}" ] && CA_FOUND="${CA_PATH}"
+
+BASE_URL=""
+MODELS_JSON=""
+if [ -n "${URL_OVERRIDE}" ]; then
+    BASE_URL="${URL_OVERRIDE}"
+    MODELS_JSON="$(probe "${BASE_URL}")" || { log_error "server not reachable at ${BASE_URL}"; exit 1; }
+else
+    for cand in ${ENDPOINTS}; do
+        log_verbose "probing ${cand} ..."
+        if MODELS_JSON="$(probe "${cand%/}")"; then BASE_URL="${cand%/}"; break; fi
+    done
+    [ -n "${BASE_URL}" ] || { log_error "no endpoint reachable (tried: ${ENDPOINTS}). Is the server up?"; exit 1; }
+fi
+
+case "${BASE_URL}" in
+    https://*)
+        if [ -z "${CA_FOUND}" ] && [ "${INSECURE}" != true ]; then
+            # only refuse if the cert actually fails system trust
+            if ! curl -sf --max-time 4 -H "Authorization: Bearer ${TOKEN}" "${BASE_URL}/v1/models" >/dev/null 2>&1; then
+                log_error "${BASE_URL} uses a certificate this machine doesn't trust."
+                log_error "Set the CA in ${CONFIG_FILE} (CA_PATH=...) or run with --insecure."
+                exit 1
+            fi
+        fi ;;
+esac
+
+DISCOVERED="$(printf '%s' "${MODELS_JSON}" | python3 -c '
+import json, sys
+d = (json.load(sys.stdin).get("data") or [{}])[0]
+print(d.get("id", ""), d.get("max_model_len", ""))' 2>/dev/null)" || DISCOVERED=""
+DISCOVERED_ID="${DISCOVERED% *}"
+DISCOVERED_LEN="${DISCOVERED##* }"
+
+MODEL="${MODEL_OVERRIDE:-${DISCOVERED_ID}}"
+[ -n "${MODEL}" ] || { log_error "could not discover a model from ${BASE_URL}/v1/models and no --model given."; exit 1; }
+
+export ANTHROPIC_AUTH_TOKEN="${TOKEN}"
+export ANTHROPIC_API_KEY="${TOKEN}"
+export ANTHROPIC_BASE_URL="${BASE_URL}"
+export ANTHROPIC_DEFAULT_OPUS_MODEL="${MODEL}"
+export ANTHROPIC_DEFAULT_SONNET_MODEL="${MODEL}"
+export ANTHROPIC_DEFAULT_HAIKU_MODEL="${MODEL}"
+if [ -n "${DISCOVERED_LEN}" ]; then
+    # Claude Code assumes 200k for unknown models; pin the server's real window.
+    export CLAUDE_CODE_MAX_CONTEXT_TOKENS="${DISCOVERED_LEN}"
+fi
+case "${BASE_URL}" in
+    https://*) [ -n "${CA_FOUND}" ] && export NODE_EXTRA_CA_CERTS="${CA_FOUND}"
+               [ "${INSECURE}" = true ] && [ -z "${CA_FOUND}" ] && export NODE_TLS_REJECT_UNAUTHORIZED=0 ;;
+esac
+
+log "connecting: ${BASE_URL}  model: ${MODEL}${DISCOVERED_LEN:+  context: ${DISCOVERED_LEN}}"
+if [ ${#PASSTHROUGH[@]} -eq 0 ]; then
+    exec claude --model "${MODEL}"
+else
+    exec claude --model "${MODEL}" "${PASSTHROUGH[@]}"
+fi
