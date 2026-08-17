@@ -325,8 +325,14 @@ export ANTHROPIC_DEFAULT_OPUS_MODEL="${MODEL}"
 export ANTHROPIC_DEFAULT_SONNET_MODEL="${MODEL}"
 export ANTHROPIC_DEFAULT_HAIKU_MODEL="${MODEL}"
 if [ -n "${DISCOVERED_LEN}" ]; then
-    # Claude Code assumes 200k for unknown models; pin the server's real window.
-    export CLAUDE_CODE_MAX_CONTEXT_TOKENS="${DISCOVERED_LEN}"
+    # Partition the server window: vLLM enforces input + max_tokens <= window,
+    # so pin Claude Code's context to (window - output cap). Compaction then
+    # fires before input can crowd out the output budget -- full-size responses
+    # with no overflow-400 possible by construction (seen 2026-08-17:
+    # 129,793 input + 32,000 requested -> 400 from vLLM).
+    OUTPUT_CAP="${CLAUDE_CODE_MAX_OUTPUT_TOKENS:-32768}"
+    export CLAUDE_CODE_MAX_OUTPUT_TOKENS="${OUTPUT_CAP}"
+    export CLAUDE_CODE_MAX_CONTEXT_TOKENS="$(( DISCOVERED_LEN - OUTPUT_CAP ))"
 fi
 case "${BASE_URL}" in
     https://*) [ -n "${CA_FOUND}" ] && export NODE_EXTRA_CA_CERTS="${CA_FOUND}"

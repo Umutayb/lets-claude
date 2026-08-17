@@ -89,9 +89,15 @@ models leak `<think>` tags into the visible output.
 Claude Code doesn't recognize self-hosted model names and assumes a **200k**
 context window. If your server's `max_model_len` is smaller, long sessions
 overflow the server before Claude Code auto-compacts. `lets-claude` reads
-`max_model_len` from `/v1/models` at every launch and sets
-`CLAUDE_CODE_MAX_CONTEXT_TOKENS` to match — automatically correct even after
-you swap models.
+`max_model_len` from `/v1/models` at every launch and **partitions** it:
+`CLAUDE_CODE_MAX_OUTPUT_TOKENS` (default 32768) is reserved for responses and
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS` gets the remainder. vLLM rejects any request
+where `input + max_tokens` exceeds the window; with the partition, compaction
+always fires before the input side can crowd out the response budget, so
+those overflow 400s are impossible by construction — automatically correct
+even after you swap models. Prefer longer conversations over long responses?
+Launch with `CLAUDE_CODE_MAX_OUTPUT_TOKENS=16384 lets-claude` — the context
+share grows to match; the two always sum to the server window.
 
 ### Recipe 3 — one config that works at home, on the LAN, and over VPN
 
